@@ -7,7 +7,7 @@
         android:testOnly="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="AntiProcrastinator2000"
+        android:label="AntiProc2000"
         android:theme="@style/Theme.AntiProcrastinator2000">
 
         <activity

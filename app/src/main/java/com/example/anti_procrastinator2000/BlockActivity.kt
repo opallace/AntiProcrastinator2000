@@ -44,7 +44,9 @@ import java.time.format.DateTimeFormatter
 import kotlin.math.max
 
 private const val TAG = "AntiProcrastinator2000"
+
 private const val BLOCK_STATE_PREFS = "block_state"
+private const val KEY_START_MILLIS = "start_millis"
 private const val KEY_END_MILLIS = "end_millis"
 private const val KEY_PREVIOUS_HOME_PACKAGE = "previous_home_package"
 private const val KEY_PREVIOUS_HOME_CLASS = "previous_home_class"
@@ -55,6 +57,9 @@ class BlockActivity : ComponentActivity() {
     private lateinit var adminComponent: ComponentName
 
     private var alreadyStopping = false
+
+    private var currentStartMillis: Long = -1L
+    private var currentEndMillis: Long = -1L
 
     private val endBlockReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -67,6 +72,7 @@ class BlockActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         enableEdgeToEdge()
 
         devicePolicyManager =
@@ -80,16 +86,14 @@ class BlockActivity : ComponentActivity() {
         registerEndBlockReceiver()
 
         if (intent?.action == BlockAction.ACTION_END_BLOCK) {
+            loadCurrentBlockFromIntentOrPrefs()
             stopBlocking()
             return
         }
 
-        val endTimeMillis = intent.getLongExtra(
-            BlockAction.EXTRA_END_TIME_MILLIS,
-            -1L
-        )
+        loadCurrentBlockFromIntentOrPrefs()
 
-        if (endTimeMillis <= System.currentTimeMillis()) {
+        if (currentEndMillis <= System.currentTimeMillis()) {
             stopBlocking()
             return
         }
@@ -103,7 +107,7 @@ class BlockActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     BlockScreen(
-                        endTimeMillis = endTimeMillis,
+                        endTimeMillis = currentEndMillis,
                         onTimeFinished = {
                             Log.d(TAG, "Cronômetro chegou ao fim")
                             stopBlocking()
@@ -117,7 +121,10 @@ class BlockActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
 
+        setIntent(intent)
+
         if (intent.action == BlockAction.ACTION_END_BLOCK) {
+            loadCurrentBlockFromIntentOrPrefs()
             stopBlocking()
         }
     }
@@ -134,6 +141,37 @@ class BlockActivity : ComponentActivity() {
         }
 
         super.onDestroy()
+    }
+
+    private fun loadCurrentBlockFromIntentOrPrefs() {
+        val prefs = getSharedPreferences(BLOCK_STATE_PREFS, Context.MODE_PRIVATE)
+
+        val startFromIntent = intent.getLongExtra(
+            BlockAction.EXTRA_START_TIME_MILLIS,
+            -1L
+        )
+
+        val endFromIntent = intent.getLongExtra(
+            BlockAction.EXTRA_END_TIME_MILLIS,
+            -1L
+        )
+
+        currentStartMillis = if (startFromIntent > 0L) {
+            startFromIntent
+        } else {
+            prefs.getLong(KEY_START_MILLIS, -1L)
+        }
+
+        currentEndMillis = if (endFromIntent > 0L) {
+            endFromIntent
+        } else {
+            prefs.getLong(KEY_END_MILLIS, -1L)
+        }
+
+        Log.d(
+            TAG,
+            "Bloqueio carregado: startMillis=$currentStartMillis, endMillis=$currentEndMillis"
+        )
     }
 
     private fun registerEndBlockReceiver() {
@@ -171,7 +209,10 @@ class BlockActivity : ComponentActivity() {
     }
 
     private fun stopBlocking() {
-        if (alreadyStopping) return
+        if (alreadyStopping) {
+            return
+        }
+
         alreadyStopping = true
 
         Log.d(TAG, "Tentando parar Lock Task")
@@ -183,10 +224,30 @@ class BlockActivity : ComponentActivity() {
             Log.e(TAG, "Erro ao parar Lock Task", e)
         }
 
+        saveCompletedSession()
         clearAntiProcrastinator2000AsHome()
         clearBlockState()
         openMainActivity()
+
         finish()
+    }
+
+    private fun saveCompletedSession() {
+        if (currentStartMillis <= 0L || currentEndMillis <= currentStartMillis) {
+            Log.d(TAG, "Sessão não salva: intervalo inválido")
+            return
+        }
+
+        BlockHistoryRepository.addCompletedSession(
+            context = this,
+            startMillis = currentStartMillis,
+            endMillis = currentEndMillis
+        )
+
+        Log.d(
+            TAG,
+            "Sessão salva no histórico: ${currentEndMillis - currentStartMillis} ms"
+        )
     }
 
     private fun clearAntiProcrastinator2000AsHome() {
@@ -207,6 +268,7 @@ class BlockActivity : ComponentActivity() {
 
     private fun restorePreviousHomeActivity() {
         val prefs = getSharedPreferences(BLOCK_STATE_PREFS, Context.MODE_PRIVATE)
+
         val previousHomePackage = prefs.getString(KEY_PREVIOUS_HOME_PACKAGE, null)
         val previousHomeClass = prefs.getString(KEY_PREVIOUS_HOME_CLASS, null)
 
@@ -232,7 +294,10 @@ class BlockActivity : ComponentActivity() {
                 previousHomeComponent
             )
 
-            Log.d(TAG, "HOME anterior restaurado: $previousHomePackage/$previousHomeClass")
+            Log.d(
+                TAG,
+                "HOME anterior restaurado: $previousHomePackage/$previousHomeClass"
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao restaurar HOME anterior", e)
         }
@@ -241,6 +306,7 @@ class BlockActivity : ComponentActivity() {
     private fun clearBlockState() {
         getSharedPreferences(BLOCK_STATE_PREFS, Context.MODE_PRIVATE)
             .edit()
+            .remove(KEY_START_MILLIS)
             .remove(KEY_END_MILLIS)
             .remove(KEY_PREVIOUS_HOME_PACKAGE)
             .remove(KEY_PREVIOUS_HOME_CLASS)

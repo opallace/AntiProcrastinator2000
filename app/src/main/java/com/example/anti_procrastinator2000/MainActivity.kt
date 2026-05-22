@@ -46,28 +46,40 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 private const val TAG = "AntiProcrastinator2000"
+
 private const val BLOCK_STATE_PREFS = "block_state"
+private const val KEY_START_MILLIS = "start_millis"
 private const val KEY_END_MILLIS = "end_millis"
 private const val KEY_PREVIOUS_HOME_PACKAGE = "previous_home_package"
 private const val KEY_PREVIOUS_HOME_CLASS = "previous_home_class"
+
 private const val END_ALARM_REQUEST_CODE = 200
+
+data class HistoryStats(
+    val totalSavedMillis: Long = 0L,
+    val completedSessions: Int = 0
+)
 
 class MainActivity : ComponentActivity() {
 
+    private var historyStats by mutableStateOf(HistoryStats())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         enableEdgeToEdge()
 
         clearHomeIfThereIsNoActiveBlock()
         resumeActiveBlockIfNeeded()
+        refreshHistoryStats()
 
         setContent {
             MaterialTheme {
@@ -76,6 +88,7 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     MainScreen(
+                        historyStats = historyStats,
                         onStartBlockNow = { durationMillis ->
                             startBlockNow(durationMillis)
                         }
@@ -85,8 +98,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshHistoryStats()
+    }
+
+    private fun refreshHistoryStats() {
+        historyStats = HistoryStats(
+            totalSavedMillis = BlockHistoryRepository.getTotalSavedMillis(this),
+            completedSessions = BlockHistoryRepository.getCompletedSessionsCount(this)
+        )
+    }
+
     private fun startBlockNow(durationMillis: Long) {
-        val endMillis = System.currentTimeMillis() + durationMillis
+        val startMillis = System.currentTimeMillis()
+        val endMillis = startMillis + durationMillis
 
         Log.d(TAG, "Iniciando bloqueio. durationMillis=$durationMillis")
 
@@ -96,16 +122,21 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        saveBlockEndTime(endMillis)
+        saveBlockTimeRange(startMillis, endMillis)
         setAntiProcrastinator2000AsHome()
-        openBlockActivity(endMillis)
+        openBlockActivity(startMillis, endMillis)
     }
 
     private fun resumeActiveBlockIfNeeded() {
+        val startMillis = getSavedBlockStartTime()
         val endMillis = getSavedBlockEndTime()
-        if (endMillis <= 0L) return
+
+        if (endMillis <= 0L) {
+            return
+        }
 
         val now = System.currentTimeMillis()
+
         if (now >= endMillis) {
             Log.d(TAG, "Bloqueio salvo já expirou. Limpando estado.")
             clearBlockState()
@@ -114,12 +145,14 @@ class MainActivity : ComponentActivity() {
         }
 
         Log.d(TAG, "Bloqueio ativo detectado. Retomando BlockActivity.")
+
         scheduleEndAlarm(endMillis)
-        openBlockActivity(endMillis)
+        openBlockActivity(startMillis, endMillis)
     }
 
-    private fun openBlockActivity(endMillis: Long) {
+    private fun openBlockActivity(startMillis: Long, endMillis: Long) {
         val intent = Intent(this, BlockActivity::class.java).apply {
+            putExtra(BlockAction.EXTRA_START_TIME_MILLIS, startMillis)
             putExtra(BlockAction.EXTRA_END_TIME_MILLIS, endMillis)
         }
 
@@ -161,6 +194,7 @@ class MainActivity : ComponentActivity() {
         )
 
         Log.d(TAG, "Alarme de fim agendado")
+
         return true
     }
 
@@ -168,17 +202,20 @@ class MainActivity : ComponentActivity() {
         val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val admin = ComponentName(this, MyDeviceAdminReceiver::class.java)
 
-        if (!dpm.isDeviceOwnerApp(packageName)) return
+        if (!dpm.isDeviceOwnerApp(packageName)) {
+            Log.d(TAG, "App não é Device Owner. HOME não foi alterado.")
+            return
+        }
 
         saveCurrentHomeActivity()
 
         val filter = createHomeIntentFilter()
-        val AntiProcrastinator2000Home = ComponentName(this, MainActivity::class.java)
+        val antiProcrastinatorHome = ComponentName(this, MainActivity::class.java)
 
         dpm.addPersistentPreferredActivity(
             admin,
             filter,
-            AntiProcrastinator2000Home
+            antiProcrastinatorHome
         )
 
         Log.d(TAG, "AntiProcrastinator2000 definido como HOME durante bloqueio")
@@ -221,9 +258,16 @@ class MainActivity : ComponentActivity() {
         val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val admin = ComponentName(this, MyDeviceAdminReceiver::class.java)
 
-        if (!dpm.isDeviceOwnerApp(packageName)) return
+        if (!dpm.isDeviceOwnerApp(packageName)) {
+            Log.d(TAG, "App não é Device Owner. HOME não foi limpo.")
+            return
+        }
 
-        dpm.clearPackagePersistentPreferredActivities(admin, packageName)
+        dpm.clearPackagePersistentPreferredActivities(
+            admin,
+            packageName
+        )
+
         Log.d(TAG, "Preferências persistentes do AntiProcrastinator2000 limpas")
 
         restorePreviousHomeActivity(dpm, admin)
@@ -234,6 +278,7 @@ class MainActivity : ComponentActivity() {
         admin: ComponentName
     ) {
         val prefs = getSharedPreferences(BLOCK_STATE_PREFS, Context.MODE_PRIVATE)
+
         val previousHomePackage = prefs.getString(KEY_PREVIOUS_HOME_PACKAGE, null)
         val previousHomeClass = prefs.getString(KEY_PREVIOUS_HOME_CLASS, null)
 
@@ -243,7 +288,10 @@ class MainActivity : ComponentActivity() {
         }
 
         try {
-            val previousHome = ComponentName(previousHomePackage, previousHomeClass)
+            val previousHome = ComponentName(
+                previousHomePackage,
+                previousHomeClass
+            )
 
             dpm.addPersistentPreferredActivity(
                 admin,
@@ -264,11 +312,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveBlockEndTime(endMillis: Long) {
+    private fun saveBlockTimeRange(startMillis: Long, endMillis: Long) {
         getSharedPreferences(BLOCK_STATE_PREFS, Context.MODE_PRIVATE)
             .edit()
+            .putLong(KEY_START_MILLIS, startMillis)
             .putLong(KEY_END_MILLIS, endMillis)
             .apply()
+    }
+
+    private fun getSavedBlockStartTime(): Long {
+        return getSharedPreferences(BLOCK_STATE_PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_START_MILLIS, -1L)
     }
 
     private fun getSavedBlockEndTime(): Long {
@@ -279,6 +333,7 @@ class MainActivity : ComponentActivity() {
     private fun clearBlockState() {
         getSharedPreferences(BLOCK_STATE_PREFS, Context.MODE_PRIVATE)
             .edit()
+            .remove(KEY_START_MILLIS)
             .remove(KEY_END_MILLIS)
             .remove(KEY_PREVIOUS_HOME_PACKAGE)
             .remove(KEY_PREVIOUS_HOME_CLASS)
@@ -289,6 +344,7 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
+    historyStats: HistoryStats,
     onStartBlockNow: (Long) -> Unit
 ) {
     var selectedHours by remember { mutableIntStateOf(0) }
@@ -313,7 +369,7 @@ fun MainScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "AntiProcrastinator2000",
+            text = "Anti-Procrastinator 2000",
             style = MaterialTheme.typography.headlineLarge,
             fontWeight = FontWeight.Bold
         )
@@ -326,7 +382,14 @@ fun MainScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(24.dp))
+
+        StatsCard(
+            totalSavedMillis = historyStats.totalSavedMillis,
+            completedSessions = historyStats.completedSessions
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         DurationCard(
             durationText = durationText,
@@ -387,6 +450,55 @@ fun MainScreen(
                 showDurationPicker = false
             }
         )
+    }
+}
+
+@Composable
+fun StatsCard(
+    totalSavedMillis: Long,
+    completedSessions: Int
+) {
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant
+        ),
+        colors = CardDefaults.outlinedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp)
+        ) {
+            Text(
+                text = "Tempo economizado",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = formatSavedTime(totalSavedMillis),
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = when (completedSessions) {
+                    0 -> "Nenhum bloqueio concluído ainda"
+                    1 -> "1 bloqueio concluído"
+                    else -> "$completedSessions bloqueios concluídos"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -462,6 +574,19 @@ fun formatDuration(hours: Int, minutes: Int): String {
         hours == 0 -> "$minutes min"
         minutes == 0 -> "$hours h"
         else -> "$hours h $minutes min"
+    }
+}
+
+fun formatSavedTime(milliseconds: Long): String {
+    val totalMinutes = milliseconds / 60000L
+    val hours = totalMinutes / 60L
+    val minutes = totalMinutes % 60L
+
+    return when {
+        hours > 0 && minutes > 0 -> "${hours}h ${minutes}min"
+        hours > 0 -> "${hours}h"
+        minutes > 0 -> "${minutes}min"
+        else -> "0min"
     }
 }
 
